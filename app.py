@@ -2,80 +2,151 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, timedelta
+from access_control import (
+    USER_TAG_ACCESS, get_user_permissions, has_workflow_access,
+    can_execute_workflow, can_toggle_workflow, filter_workflows_by_access,
+    AuditLogger, get_all_users
+)
+from n8n_client import (
+    get_workflows, get_executions, toggle_workflow, trigger_workflow,
+    get_workflow_statistics, test_connection, get_all_tags,
+    get_execution_by_id, is_api_configured
+)
 import time
-import random
-from n8n_client import get_workflows, get_executions, toggle_workflow
-from mock_data import MOCK_AUDIT_LOGS
 
 # --- PAGE CONFIG ---
 st.set_page_config(
-    page_title="MATRIX_OS // N8N_CONTROL",
-    page_icon="📟",
+    page_title="n8n Matrix Terminal",
+    page_icon="🔟",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# --- ADVANCED MATRIX THEME CSS ---
+# --- MATRIX THEME CSS ---
 st.markdown("""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
-
-    * {
-        font-family: 'Share Tech Mono', monospace !important;
-    }
-
+    /* Main background and text */
     .stApp {
         background-color: #000000;
-        background-image: linear-gradient(rgba(0, 255, 65, 0.05) 1px, transparent 1px),
-                          linear-gradient(90deg, rgba(0, 255, 65, 0.05) 1px, transparent 1px);
-        background-size: 20px 20px;
         color: #00FF41;
+        font-family: 'Courier New', Courier, monospace;
     }
     
-    .glow {
-        text-shadow: 0 0 5px #00FF41, 0 0 10px #00FF41;
-    }
-
+    /* Sidebar styling */
     [data-testid="stSidebar"] {
-        background-color: #020202;
-        border-right: 2px solid #00FF41;
-        box-shadow: 5px 0 15px rgba(0, 255, 65, 0.2);
+        background-color: #050505;
+        border-right: 1px solid #00FF41;
+    }
+    [data-testid="stSidebar"] * {
+        color: #00FF41 !important;
+    }
+    
+    /* Headers */
+    h1, h2, h3, h4, h5, h6, p, span, label {
+        color: #00FF41 !important;
+        text-shadow: 0 0 5px #00FF41;
     }
 
-    .terminal-card {
-        border: 1px solid #00FF41;
-        padding: 20px;
-        background: rgba(0, 0, 0, 0.8);
-        box-shadow: inset 0 0 10px #00FF41;
-        margin-bottom: 20px;
-    }
-
+    /* Buttons */
     .stButton>button {
-        width: 100%;
-        background-color: transparent;
+        background-color: #000000;
         color: #00FF41;
         border: 1px solid #00FF41;
         border-radius: 0px;
-        padding: 10px;
-        transition: 0.3s all;
+        transition: all 0.3s;
         text-transform: uppercase;
-        letter-spacing: 2px;
+        font-weight: bold;
     }
     .stButton>button:hover {
         background-color: #00FF41;
-        color: #000;
-        box-shadow: 0 0 20px #00FF41;
+        color: #000000;
+        box-shadow: 0 0 15px #00FF41;
     }
 
-    [data-testid="stMetric"] {
+    /* Inputs */
+    .stTextInput>div>div>input {
+        background-color: #000000;
+        color: #00FF41;
         border: 1px solid #00FF41;
-        padding: 10px;
-        background: rgba(0, 50, 0, 0.1);
+    }
+    
+    /* Selectbox */
+    .stSelectbox>div>div>div {
+        background-color: #000000;
+        color: #00FF41;
+        border: 1px solid #00FF41;
+    }
+    
+    /* Expander */
+    .streamlit-expanderHeader {
+        background-color: #000000 !important;
+        border: 1px solid #00FF41 !important;
+        color: #00FF41 !important;
+    }
+    
+    /* Metrics */
+    [data-testid="stMetricValue"] {
+        color: #00FF41 !important;
+    }
+    
+    /* Tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 10px;
+        background-color: transparent;
+    }
+    .stTabs [data-baseweb="tab"] {
+        height: 50px;
+        background-color: #000000;
+        border: 1px solid #00FF41;
+        color: #00FF41;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #00FF41 !important;
+        color: #000000 !important;
     }
 
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
+    /* Custom scrollbar */
+    ::-webkit-scrollbar {
+        width: 10px;
+    }
+    ::-webkit-scrollbar-track {
+        background: #000;
+    }
+    ::-webkit-scrollbar-thumb {
+        background: #00FF41;
+    }
+    
+    /* Tables */
+    .dataframe {
+        color: #00FF41 !important;
+        background-color: #000000 !important;
+    }
+    
+    /* Success/Error messages */
+    .stSuccess {
+        background-color: #001a00 !important;
+        color: #00FF41 !important;
+        border: 1px solid #00FF41 !important;
+    }
+    
+    .stError {
+        background-color: #1a0000 !important;
+        color: #FF0041 !important;
+        border: 1px solid #FF0041 !important;
+    }
+    
+    .stWarning {
+        background-color: #1a1a00 !important;
+        color: #FFFF41 !important;
+        border: 1px solid #FFFF41 !important;
+    }
+    
+    .stInfo {
+        background-color: #00001a !important;
+        color: #4141FF !important;
+        border: 1px solid #4141FF !important;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -86,177 +157,532 @@ if "username" not in st.session_state:
     st.session_state.username = None
 if "selected_wf_id" not in st.session_state:
     st.session_state.selected_wf_id = None
-if "view" not in st.session_state:
-    st.session_state.view = "DASHBOARD"
+if "auto_refresh" not in st.session_state:
+    st.session_state.auto_refresh = False
 
-# --- AUTHENTICATION USING ST.SECRETS ---
-def login_screen():
-    st.markdown("<h1 style='text-align: center; font-size: 60px;' class='glow'>MATRIX_OS</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; letter-spacing: 5px;'>SYSTEM_AUTHENTICATION_REQUIRED</p>", unsafe_allow_html=True)
+# --- AUTHENTICATION CREDENTIALS ---
+# In production, use environment variables or secure credential storage
+VALID_USERS = {
+    "kelly": "password",
+    "admin": "admin123",
+    "finance": "finance123",
+    "devops": "devops123",
+    "sales": "sales123",
+}
+
+# --- LOGIN PAGE ---
+def login_page():
+    st.sidebar.title("⚡ SYSTEM ACCESS")
     
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        with st.form("login_form"):
-            u = st.text_input("USER_IDENTIFIER", placeholder="ID...")
-            p = st.text_input("ACCESS_KEY", type="password", placeholder="****")
-            if st.form_submit_button("INITIALIZE_SEQUENCE"):
-                # Check against st.secrets
-                if "users" in st.secrets and u in st.secrets["users"]:
-                    if p == st.secrets["users"][u]["password"]:
-                        st.session_state.logged_in = True
-                        st.session_state.username = u
-                        st.rerun()
-                    else:
-                        st.error("INVALID_ACCESS_KEY // ACCESS_DENIED")
-                else:
-                    st.error("USER_NOT_FOUND // ACCESS_DENIED")
+    # Connection status indicator
+    conn_status = test_connection()
+    if conn_status["connected"]:
+        st.sidebar.success(f"✓ API CONNECTED")
+        st.sidebar.caption(f"Workflows: {conn_status.get('workflow_count', 0)}")
+    else:
+        st.sidebar.error(f"✗ API OFFLINE")
+        st.sidebar.caption(conn_status.get("message", "Unknown error"))
+    
+    st.sidebar.markdown("---")
+    
+    with st.sidebar:
+        username = st.text_input("USER_ID", placeholder="Enter ID...")
+        password = st.text_input("ACCESS_CODE", type="password", placeholder="********")
+        
+        if st.button("INITIALIZE", use_container_width=True):
+            if username in VALID_USERS and password == VALID_USERS[username]:
+                st.session_state.logged_in = True
+                st.session_state.username = username
+                
+                # Log login action
+                AuditLogger.log_action(
+                    username=username,
+                    action="login",
+                    status="success"
+                )
+                
+                st.rerun()
+            else:
+                # Log failed login
+                AuditLogger.log_action(
+                    username=username or "unknown",
+                    action="login",
+                    status="failed",
+                    details={"reason": "invalid_credentials"}
+                )
+                st.error("ACCESS DENIED: INVALID CREDENTIALS")
 
+# --- MAIN APP LOGIC ---
 if not st.session_state.logged_in:
-    login_screen()
+    login_page()
+    st.markdown("<h1 style='text-align: center; margin-top: 20%;'>[ SYSTEM OFFLINE ]</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center;'>PLEASE AUTHENTICATE VIA TERMINAL</p>", unsafe_allow_html=True)
     st.stop()
 
-# --- DATA PROCESSING & ACCESS CONTROL ---
+# --- USER CONTEXT ---
 username = st.session_state.username
+user_perms = get_user_permissions(username)
+
+# --- CHECK API CONNECTION ---
+if not is_api_configured():
+    st.error("⚠️ N8N API NOT CONFIGURED")
+    st.info("Please set N8N_API_URL and N8N_API_KEY environment variables")
+    st.code("""
+    export N8N_API_URL="http://your-n8n-instance:5678/api/v1"
+    export N8N_API_KEY="your-api-key"
+    """)
+    
+    if st.sidebar.button("LOGOUT"):
+        st.session_state.logged_in = False
+        AuditLogger.log_action(username=username, action="logout", status="success")
+        st.rerun()
+    st.stop()
+
+# --- DATA LOADING ---
 all_workflows = get_workflows()
 
-# Get allowed tags from st.secrets for the logged-in user
-allowed_tags = st.secrets["users"][username].get("tags", [])
-
-if username == "admin":
-    user_workflows = all_workflows
-else:
-    user_workflows = [wf for wf in all_workflows if any(tag in allowed_tags for tag in wf.get("tags", []))]
-
-# --- SIDEBAR ---
-with st.sidebar:
-    st.markdown(f"<h2 class='glow'>USER: {username.upper()}</h2>", unsafe_allow_html=True)
-    st.markdown("---")
-    
-    if st.button("📊 GLOBAL_DASHBOARD"): st.session_state.view = "DASHBOARD"
-    if st.button("📜 AUDIT_LOGS"): st.session_state.view = "AUDIT"
-    if st.button("⚙️ SYSTEM_SETTINGS"): st.session_state.view = "SETTINGS"
-    
-    st.markdown("---")
-    st.subheader("WORKFLOW_NODES")
-    search = st.text_input("SCAN_ID", "")
-    tag_filter = st.selectbox("TAG_FILTER", ["ALL"] + list(allowed_tags))
-    
-    filtered = user_workflows
-    if search: filtered = [wf for wf in filtered if search.lower() in wf['name'].lower()]
-    if tag_filter != "ALL": filtered = [wf for wf in filtered if tag_filter in wf.get("tags", [])]
-    
-    for wf in filtered:
-        label = f"{'[A]' if wf.get('active') else '[O]'} {wf['name']}"
-        if st.button(label, key=f"nav_{wf['id']}"):
-            st.session_state.selected_wf_id = wf['id']
-            st.session_state.view = "WORKFLOW"
-            
-    st.markdown("---")
-    if st.button("❌ TERMINATE"):
+if not all_workflows:
+    st.warning("⚠️ NO WORKFLOWS FOUND - Check n8n connection")
+    if st.sidebar.button("LOGOUT"):
         st.session_state.logged_in = False
+        AuditLogger.log_action(username=username, action="logout", status="success")
         st.rerun()
+    st.stop()
 
-# --- MAIN VIEWS ---
-if st.session_state.view == "DASHBOARD":
-    st.markdown("<h1 class='glow'>> GLOBAL_SYSTEM_OVERVIEW</h1>", unsafe_allow_html=True)
+# Filter workflows by user access
+user_workflows = filter_workflows_by_access(username, all_workflows)
+allowed_tags = user_perms["allowed_tags"] if user_perms["role"] != "administrator" else get_all_tags()
+
+if not user_workflows:
+    st.error(f"FATAL ERROR: NO WORKFLOWS AUTHORIZED FOR USER [{username.upper()}]")
+    st.info("Contact administrator to request access")
+    if st.sidebar.button("LOGOUT"):
+        st.session_state.logged_in = False
+        AuditLogger.log_action(username=username, action="logout", status="success")
+        st.rerun()
+    st.stop()
+
+# --- SIDEBAR NAVIGATION ---
+st.sidebar.title(f"👤 USER: {username.upper()}")
+st.sidebar.caption(f"ROLE: {user_perms['role'].upper()}")
+st.sidebar.markdown("---")
+
+# Connection info
+conn_status = test_connection()
+if conn_status["connected"]:
+    st.sidebar.success(f"✓ CONNECTED")
+else:
+    st.sidebar.error(f"✗ DISCONNECTED")
+
+st.sidebar.markdown("---")
+
+# Search and Filter
+search_query = st.sidebar.text_input("🔍 SCAN_NAME", "")
+selected_tag = st.sidebar.selectbox("🏷️ FILTER_TAG", ["ALL_TAGS"] + allowed_tags)
+status_filter = st.sidebar.selectbox("📊 STATUS", ["ALL", "ACTIVE", "INACTIVE"])
+
+# Apply filters
+filtered_workflows = user_workflows.copy()
+
+if search_query:
+    filtered_workflows = [wf for wf in filtered_workflows if search_query.lower() in wf['name'].lower()]
+
+if selected_tag != "ALL_TAGS":
+    filtered_workflows = [wf for wf in filtered_workflows if selected_tag in wf.get("tags", [])]
+
+if status_filter == "ACTIVE":
+    filtered_workflows = [wf for wf in filtered_workflows if wf.get('active')]
+elif status_filter == "INACTIVE":
+    filtered_workflows = [wf for wf in filtered_workflows if not wf.get('active')]
+
+st.sidebar.subheader(f"NODES_FOUND: {len(filtered_workflows)}")
+st.sidebar.markdown("---")
+
+# Workflow Selection
+for wf in filtered_workflows:
+    status_icon = "🟢" if wf.get('active') else "🔴"
+    button_label = f"{status_icon} {wf['name']}"
     
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("TOTAL_NODES", len(user_workflows))
-    m2.metric("ACTIVE_STREAMS", len([wf for wf in user_workflows if wf.get('active')]))
-    m3.metric("SYSTEM_HEALTH", "98.4%")
-    m4.metric("UPTIME", "1024:12:04")
+    if st.sidebar.button(button_label, key=f"btn_{wf['id']}", use_container_width=True):
+        st.session_state.selected_wf_id = wf['id']
+        
+        # Log workflow view
+        AuditLogger.log_action(
+            username=username,
+            action="view_workflow",
+            workflow_id=wf['id'],
+            workflow_name=wf['name'],
+            status="success"
+        )
+
+# Auto-refresh toggle
+st.sidebar.markdown("---")
+st.sidebar.subheader("⚙️ SETTINGS")
+auto_refresh = st.sidebar.checkbox("AUTO-REFRESH (30s)", value=st.session_state.auto_refresh)
+st.session_state.auto_refresh = auto_refresh
+
+if st.sidebar.button("TERMINATE_SESSION", use_container_width=True):
+    AuditLogger.log_action(username=username, action="logout", status="success")
+    st.session_state.logged_in = False
+    st.rerun()
+
+# --- MAIN CONTENT ---
+if not st.session_state.selected_wf_id and filtered_workflows:
+    st.session_state.selected_wf_id = filtered_workflows[0]['id']
+
+selected_wf = next((wf for wf in user_workflows if wf['id'] == st.session_state.selected_wf_id), None)
+
+if selected_wf:
+    # Header Section
+    col_title, col_refresh = st.columns([4, 1])
+    with col_title:
+        st.title(f"> WORKFLOW: {selected_wf['name']}")
+    with col_refresh:
+        if st.button("🔄 REFRESH", use_container_width=True):
+            st.rerun()
     
-    col_left, col_right = st.columns(2)
-    with col_left:
-        st.markdown("### DATA_FLOW_DISTRIBUTION")
-        tag_counts = {}
-        for wf in user_workflows:
-            for tag in wf.get('tags', []):
-                tag_counts[tag] = tag_counts.get(tag, 0) + 1
-        df_tags = pd.DataFrame(list(tag_counts.items()), columns=['Tag', 'Count'])
-        fig = px.pie(df_tags, values='Count', names='Tag', hole=.3)
-        fig.update_layout(plot_bgcolor='black', paper_bgcolor='black', font_color='#00FF41')
-        st.plotly_chart(fig, use_container_width=True)
-        
-    with col_right:
-        st.markdown("### RECENT_ACTIVITY_PULSE")
-        pulse_data = pd.DataFrame({
-            'Time': pd.date_range(start='now', periods=20, freq='min'),
-            'Load': [random.randint(20, 90) for _ in range(20)]
-        })
-        fig = px.line(pulse_data, x='Time', y='Load')
-        fig.update_layout(plot_bgcolor='black', paper_bgcolor='black', font_color='#00FF41')
-        fig.update_traces(line_color='#00FF41')
-        st.plotly_chart(fig, use_container_width=True)
-
-elif st.session_state.view == "AUDIT":
-    st.markdown("<h1 class='glow'>> SYSTEM_AUDIT_LOGS</h1>", unsafe_allow_html=True)
-    st.table(pd.DataFrame(MOCK_AUDIT_LOGS))
-
-elif st.session_state.view == "WORKFLOW":
-    wf = next((w for w in user_workflows if w['id'] == st.session_state.selected_wf_id), None)
-    if wf:
-        st.markdown(f"<h1 class='glow'>> NODE: {wf['name'].upper()}</h1>", unsafe_allow_html=True)
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            if st.button("⚡ EXECUTE"): st.toast("SIGNAL_SENT")
-        with c2:
-            if wf['active']:
-                if st.button("🛑 DEACTIVATE"): 
-                    toggle_workflow(wf['id'], False)
-                    st.rerun()
-            else:
-                if st.button("🚀 ACTIVATE"): 
-                    toggle_workflow(wf['id'], True)
-                    st.rerun()
-        with c3: st.button("🔄 SYNC")
-        with c4: st.button("🛠️ CONFIG")
-            
-        st.markdown("---")
-        t1, t2, t3 = st.tabs(["📊 ANALYTICS", "📜 LOGS", "🧩 STRUCTURE"])
-        
-        with t1:
-            execs = get_executions(wf['id'])
-            if execs:
-                df = pd.DataFrame(execs)
-                df['startedAt'] = pd.to_datetime(df['startedAt'])
-                col_a, col_b = st.columns([2, 1])
-                with col_a:
-                    fig = px.bar(df, x='startedAt', y=[1]*len(df), color='status', 
-                                 title="EXECUTION_HISTORY", color_discrete_map={'success': '#00FF41', 'failed': '#FF0000'})
-                    fig.update_layout(plot_bgcolor='black', paper_bgcolor='black', font_color='#00FF41')
-                    st.plotly_chart(fig, use_container_width=True)
-                with col_b:
-                    success_rate = len(df[df['status']=='success']) / len(df) * 100
-                    st.metric("SUCCESS_RATE", f"{success_rate:.1f}%")
-                    st.metric("AVG_LATENCY", f"{random.randint(150, 400)}ms")
-            else:
-                st.info("NO_DATA_STREAMS_FOUND")
+    st.markdown(f"**ID:** `{selected_wf['id']}` | **TAGS:** {', '.join(selected_wf.get('tags', [])) or 'None'}")
+    
+    # Workflow status badge
+    if selected_wf.get('active'):
+        st.success("✓ STATUS: ACTIVE")
+    else:
+        st.warning("⚠ STATUS: INACTIVE")
+    
+    st.markdown("---")
+    
+    # Action Buttons
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        can_exec = can_execute_workflow(username, selected_wf.get('tags', []))
+        if st.button("⚡ EXECUTE_NOW", use_container_width=True, disabled=not can_exec):
+            if can_exec:
+                st.toast("TRANSMITTING SIGNAL...")
+                execution_id = trigger_workflow(selected_wf['id'])
                 
-        with t2:
-            for e in get_executions(wf['id']):
-                with st.expander(f"ID: {e['id']} | {e['status'].upper()}"):
-                    st.json(e)
-                    
-        with t3:
-            for node in wf.get('nodes', []):
-                st.markdown(f"""
-                <div class='terminal-card'>
-                    <h3>NODE: {node['name']}</h3>
-                    <p>TYPE: {node['type']}</p>
-                    <p>STATUS: ONLINE</p>
-                </div>
-                """, unsafe_allow_html=True)
+                if execution_id:
+                    st.success(f"✓ EXECUTION INITIATED: {execution_id}")
+                    AuditLogger.log_action(
+                        username=username,
+                        action="execute_workflow",
+                        workflow_id=selected_wf['id'],
+                        workflow_name=selected_wf['name'],
+                        status="success",
+                        details={"execution_id": execution_id}
+                    )
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error("✗ EXECUTION FAILED")
+                    AuditLogger.log_action(
+                        username=username,
+                        action="execute_workflow",
+                        workflow_id=selected_wf['id'],
+                        workflow_name=selected_wf['name'],
+                        status="failed"
+                    )
+    
+    with col2:
+        can_tog = can_toggle_workflow(username, selected_wf.get('tags', []))
+        is_active = selected_wf.get('active', False)
+        
+        if is_active:
+            if st.button("🛑 DEACTIVATE", use_container_width=True, disabled=not can_tog):
+                if can_tog and toggle_workflow(selected_wf['id'], False):
+                    st.success("✓ WORKFLOW DEACTIVATED")
+                    AuditLogger.log_action(
+                        username=username,
+                        action="deactivate_workflow",
+                        workflow_id=selected_wf['id'],
+                        workflow_name=selected_wf['name'],
+                        status="success"
+                    )
+                    time.sleep(0.5)
+                    st.rerun()
+        else:
+            if st.button("🟢 ACTIVATE", use_container_width=True, disabled=not can_tog):
+                if can_tog and toggle_workflow(selected_wf['id'], True):
+                    st.success("✓ WORKFLOW ACTIVATED")
+                    AuditLogger.log_action(
+                        username=username,
+                        action="activate_workflow",
+                        workflow_id=selected_wf['id'],
+                        workflow_name=selected_wf['name'],
+                        status="success"
+                    )
+                    time.sleep(0.5)
+                    st.rerun()
+    
+    with col3:
+        # Get workflow stats
+        stats = get_workflow_statistics(selected_wf['id'])
+        st.metric("SUCCESS RATE", f"{stats['success_rate']:.1f}%")
+    
+    with col4:
+        st.metric("TOTAL RUNS", stats['total'])
 
-elif st.session_state.view == "SETTINGS":
-    st.markdown("<h1 class='glow'>> SYSTEM_CONFIGURATION</h1>", unsafe_allow_html=True)
-    sys_cfg = st.secrets.get("system", {})
-    st.checkbox("ENABLE_NEURAL_LINK", value=sys_cfg.get("neural_link", True))
-    st.checkbox("ENCRYPT_DATA_STREAMS", value=sys_cfg.get("encryption_enabled", True))
-    st.slider("SIGNAL_STRENGTH", 0, 100, sys_cfg.get("signal_strength", 85))
-    st.selectbox("TERMINAL_THEME", ["MATRIX_GREEN", "ZION_BLUE", "REBEL_RED"], index=0)
+    st.markdown("---")
+
+    # Tabs
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "[ OVERVIEW ]", 
+        "[ EXECUTION_LOGS ]", 
+        "[ NODE_MAP ]",
+        "[ STATISTICS ]"
+    ])
+
+    with tab1:
+        # Workflow Overview
+        col_a, col_b = st.columns(2)
+        
+        with col_a:
+            st.subheader("⚙️ CONFIGURATION")
+            st.write(f"**Workflow ID:** `{selected_wf['id']}`")
+            st.write(f"**Name:** {selected_wf['name']}")
+            st.write(f"**Active:** {'Yes' if selected_wf.get('active') else 'No'}")
+            st.write(f"**Tags:** {', '.join(selected_wf.get('tags', [])) or 'None'}")
+            st.write(f"**Node Count:** {len(selected_wf.get('nodes', []))}")
+            
+            if selected_wf.get('updatedAt'):
+                st.write(f"**Last Updated:** {selected_wf['updatedAt']}")
+        
+        with col_b:
+            st.subheader("📊 QUICK STATS")
+            
+            m1, m2 = st.columns(2)
+            m1.metric("Total Executions", stats['total'])
+            m2.metric("Success Count", stats['success'])
+            
+            m3, m4 = st.columns(2)
+            m3.metric("Error Count", stats['error'])
+            m4.metric("Avg Duration", f"{stats['avg_duration']:.2f}s")
+
+    with tab2:
+        # Execution Logs
+        st.subheader("📜 EXECUTION HISTORY")
+        
+        # Execution filter
+        exec_status_filter = st.selectbox(
+            "Filter by Status",
+            ["all", "success", "error", "waiting"],
+            key="exec_filter"
+        )
+        
+        executions = get_executions(
+            selected_wf['id'], 
+            limit=50,
+            status=None if exec_status_filter == "all" else exec_status_filter
+        )
+        
+        if executions:
+            st.caption(f"Showing {len(executions)} most recent executions")
+            
+            for exe in executions:
+                status = exe.get('status', 'unknown')
+                status_icon = "✓" if status == "success" else "✗" if status == "error" else "⏳"
+                status_color = "success" if status == "success" else "error" if status == "error" else "info"
+                
+                with st.expander(f"{status_icon} EXEC_ID: {exe.get('id')} | STATUS: {status.upper()}", expanded=False):
+                    col_1, col_2 = st.columns(2)
+                    
+                    with col_1:
+                        st.text(f"Started: {exe.get('startedAt', 'N/A')}")
+                        if exe.get('finishedAt'):
+                            st.text(f"Finished: {exe['finishedAt']}")
+                        
+                        # Calculate duration
+                        if exe.get('startedAt') and exe.get('finishedAt'):
+                            try:
+                                start = datetime.fromisoformat(exe['startedAt'].replace('Z', '+00:00'))
+                                finish = datetime.fromisoformat(exe['finishedAt'].replace('Z', '+00:00'))
+                                duration = (finish - start).total_seconds()
+                                st.text(f"Duration: {duration:.2f}s")
+                            except:
+                                pass
+                    
+                    with col_2:
+                        st.text(f"Status: {status}")
+                        if exe.get('mode'):
+                            st.text(f"Mode: {exe['mode']}")
+                    
+                    # Show execution data if available
+                    if exe.get('data'):
+                        st.subheader("Execution Data")
+                        st.json(exe['data'])
+        else:
+            st.info("NO EXECUTION LOGS FOUND IN BUFFER")
+
+    with tab3:
+        # Node Map
+        st.subheader("🗺️ WORKFLOW NODES")
+        
+        nodes = selected_wf.get('nodes', [])
+        
+        if nodes:
+            st.caption(f"Total Nodes: {len(nodes)}")
+            
+            for idx, node in enumerate(nodes, 1):
+                with st.expander(f"NODE {idx}: {node.get('name', 'Unnamed')}", expanded=False):
+                    st.code(f"Type: {node.get('type', 'Unknown')}", language="bash")
+                    
+                    # Show additional node properties if available
+                    if node.get('typeVersion'):
+                        st.text(f"Version: {node['typeVersion']}")
+                    if node.get('position'):
+                        st.text(f"Position: {node['position']}")
+        else:
+            st.info("NO NODE DATA AVAILABLE")
+
+    with tab4:
+        # Statistics and Analytics
+        st.subheader("📈 WORKFLOW ANALYTICS")
+        
+        # Get execution data for charts
+        recent_executions = get_executions(selected_wf['id'], limit=100)
+        
+        if recent_executions:
+            # Prepare dataframe
+            df = pd.DataFrame(recent_executions)
+            df['startedAt'] = pd.to_datetime(df['startedAt'])
+            df['date'] = df['startedAt'].dt.date
+            
+            # Executions over time
+            daily_counts = df.groupby(['date', 'status']).size().reset_index(name='count')
+            
+            fig = px.bar(
+                daily_counts, 
+                x='date', 
+                y='count', 
+                color='status',
+                title="Executions Over Time",
+                labels={'date': 'Date', 'count': 'Count', 'status': 'Status'}
+            )
+            
+            fig.update_layout(
+                plot_bgcolor='black',
+                paper_bgcolor='black',
+                font_color='#00FF41',
+                xaxis=dict(gridcolor='#003300'),
+                yaxis=dict(gridcolor='#003300')
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Status distribution
+            status_counts = df['status'].value_counts()
+            
+            fig2 = go.Figure(data=[go.Pie(
+                labels=status_counts.index,
+                values=status_counts.values,
+                hole=.3
+            )])
+            
+            fig2.update_layout(
+                title="Execution Status Distribution",
+                plot_bgcolor='black',
+                paper_bgcolor='black',
+                font_color='#00FF41'
+            )
+            
+            st.plotly_chart(fig2, use_container_width=True)
+            
+            # Recent performance metrics
+            col1, col2, col3 = st.columns(3)
+            
+            recent_7d = df[df['startedAt'] > (datetime.now() - timedelta(days=7))]
+            
+            col1.metric("Last 7 Days", len(recent_7d))
+            col2.metric("Success Rate", f"{(len(recent_7d[recent_7d['status']=='success'])/len(recent_7d)*100):.1f}%" if len(recent_7d) > 0 else "N/A")
+            col3.metric("Error Count", len(recent_7d[recent_7d['status']=='error']))
+            
+        else:
+            st.info("NO EXECUTION DATA FOR ANALYTICS")
+
+else:
+    st.title("> SYSTEM_READY")
+    st.info("AWAITING NODE SELECTION...")
+
+# --- ADMIN PANEL (if admin user) ---
+if user_perms["role"] == "administrator":
+    st.sidebar.markdown("---")
+    if st.sidebar.button("👁️ ADMIN_PANEL", use_container_width=True):
+        st.session_state.show_admin = not st.session_state.get("show_admin", False)
+    
+    if st.session_state.get("show_admin", False):
+        st.markdown("---")
+        st.title("🔐 ADMINISTRATOR PANEL")
+        
+        admin_tab1, admin_tab2, admin_tab3 = st.tabs([
+            "[ USER_MANAGEMENT ]",
+            "[ AUDIT_LOGS ]",
+            "[ SYSTEM_STATUS ]"
+        ])
+        
+        with admin_tab1:
+            st.subheader("👥 USER ACCESS CONTROL")
+            
+            all_users = get_all_users()
+            
+            for user in all_users:
+                with st.expander(f"USER: {user['username'].upper()} - {user['role'].upper()}"):
+                    st.write(f"**Role:** {user['role']}")
+                    st.write(f"**Allowed Tags:** {', '.join(user['allowed_tags'])}")
+                    st.write("**Capabilities:**")
+                    for cap, val in user['capabilities'].items():
+                        st.write(f"  - {cap}: {'✓' if val else '✗'}")
+        
+        with admin_tab2:
+            st.subheader("📋 AUDIT LOG VIEWER")
+            
+            # Log filters
+            log_user = st.selectbox("Filter by User", ["ALL"] + list(VALID_USERS.keys()))
+            log_action = st.selectbox("Filter by Action", ["ALL", "login", "logout", "view_workflow", "execute_workflow", "activate_workflow", "deactivate_workflow"])
+            
+            # Get logs
+            logs = AuditLogger.get_logs(
+                username=None if log_user == "ALL" else log_user,
+                limit=100,
+                action=None if log_action == "ALL" else log_action
+            )
+            
+            if logs:
+                st.caption(f"Showing {len(logs)} log entries")
+                
+                # Convert to dataframe for display
+                log_df = pd.DataFrame(logs)
+                st.dataframe(log_df, use_container_width=True)
+            else:
+                st.info("NO AUDIT LOGS FOUND")
+        
+        with admin_tab3:
+            st.subheader("🖥️ SYSTEM STATUS")
+            
+            conn = test_connection()
+            
+            if conn["connected"]:
+                st.success(f"✓ n8n API Connected")
+                st.write(f"**URL:** {conn['url']}")
+                st.write(f"**Workflow Count:** {conn.get('workflow_count', 0)}")
+            else:
+                st.error(f"✗ n8n API Disconnected")
+                st.write(f"**URL:** {conn['url']}")
+                st.write(f"**Error:** {conn.get('message', 'Unknown')}")
+            
+            st.markdown("---")
+            
+            # System metrics
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Workflows", len(all_workflows))
+            col2.metric("Total Users", len(all_users))
+            col3.metric("Active Workflows", len([w for w in all_workflows if w.get('active')]))
+
+# Auto-refresh logic
+if st.session_state.auto_refresh:
+    time.sleep(30)
+    st.rerun()
 
 # --- FOOTER ---
 st.sidebar.markdown("---")
-st.sidebar.caption("MATRIX_OS // VER_4.0.0")
-st.sidebar.caption("© 2199 Zion Mainframe")
+st.sidebar.caption("MATRIX_OS v4.0.0")
+st.sidebar.caption(f"Session: {datetime.now().strftime('%H:%M:%S')}")
