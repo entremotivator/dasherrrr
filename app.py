@@ -1,7 +1,7 @@
 import streamlit as st
 from access_control import USER_TAG_ACCESS
-from n8n_client import get_workflows, get_executions, toggle_workflow
 from mock_data import MOCK_WORKFLOWS, MOCK_EXECUTIONS
+from n8n_client import toggle_workflow
 from datetime import datetime
 
 st.set_page_config(page_title="n8n Kelly Dashboard Demo", layout="wide", page_icon="🤖")
@@ -25,20 +25,20 @@ if not st.session_state.logged_in:
             st.error("Invalid username or password.")
     st.stop()
 
+# --- ACCESS CONTROL ---
 allowed_tags = USER_TAG_ACCESS.get(username, [])
 if not allowed_tags:
     st.error("You do not have access to any workflows.")
     st.stop()
 
-# --- Fetch workflows ---
-all_workflows = MOCK_WORKFLOWS  # using mock workflows
+# --- FILTER WORKFLOWS BY TAG ---
+all_workflows = MOCK_WORKFLOWS
 user_workflows = [wf for wf in all_workflows if any(tag in allowed_tags for tag in wf.get("tags", []))]
-
 if not user_workflows:
     st.info("No workflows found for your tags.")
     st.stop()
 
-# --- Sidebar: workflows grouped by tags ---
+# --- SIDEBAR: workflows grouped by tags ---
 st.sidebar.title("Workflows")
 tag_dict = {}
 for wf in user_workflows:
@@ -47,13 +47,30 @@ for wf in user_workflows:
             tag_dict.setdefault(tag, []).append(wf)
 
 selected_workflow = None
+
 for tag, workflows in tag_dict.items():
     with st.sidebar.expander(f"{tag.title()} ({len(workflows)})", expanded=True):
-        wf_name = st.radio("Select workflow", options=[wf['name'] for wf in workflows], key=f"{tag}_workflow")
+        wf_names = [wf['name'] for wf in workflows]
+        key_name = f"{tag}_workflow"
+
+        # Pre-select first workflow if not set
+        if key_name not in st.session_state:
+            st.session_state[key_name] = wf_names[0]
+
+        # Radio selection
+        wf_name = st.radio(
+            "Select workflow",
+            options=wf_names,
+            index=wf_names.index(st.session_state[key_name]),
+            key=key_name
+        )
+        st.session_state[key_name] = wf_name
+
+        # Assign selected workflow
         if wf_name:
             selected_workflow = next(wf for wf in workflows if wf['name'] == wf_name)
 
-# --- Main Dashboard ---
+# --- MAIN DASHBOARD ---
 if selected_workflow:
     st.header(f"Workflow: {selected_workflow['name']}")
     st.subheader(f"Tags: {', '.join(selected_workflow.get('tags', []))}")
@@ -71,7 +88,7 @@ if selected_workflow:
             toggle_workflow(selected_workflow['id'], False)
             st.warning("Workflow deactivated!")
 
-    # --- Recent Executions ---
+    # --- RECENT EXECUTIONS ---
     st.subheader("Recent Executions")
     executions = MOCK_EXECUTIONS.get(selected_workflow['id'], [])
     if executions:
@@ -86,11 +103,12 @@ if selected_workflow:
     else:
         st.info("No executions found.")
 
-    # --- Workflow Nodes ---
+    # --- WORKFLOW NODES ---
     st.subheader("Workflow Nodes")
     for node in selected_workflow.get("nodes", []):
         with st.expander(f"{node['name']} ({node['type']})"):
             st.json(node)
 
+# --- FOOTER ---
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"Logged in as: **{username}**")
